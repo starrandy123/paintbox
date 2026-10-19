@@ -1,0 +1,9 @@
+# what the bake makes and the checks record: rebuilt by npm run make / look / broll, never kept in the tree
+data/
+out/
+node_modules/
+.DS_Store
+# the first, light-only version, kept beside the tree on the machine that made it
+_v1/
+__pycache__/
+*.pyc

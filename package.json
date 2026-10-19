@@ -1,0 +1,25 @@
+{
+  "name": "paintbox",
+  "version": "1.0.0",
+  "description": "Code keeps the world as boxes; small AI painters paint every pixel in the browser, on any GPU. Bake, train and ship your own painted world.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "serve": "node bake/serve.mjs 8737",
+    "truth": "node bake/truth_look.mjs bake/views_truth.json 64 0.5",
+    "make": "node bake/make.mjs",
+    "make:quick": "node bake/make.mjs --quick",
+    "look": "node bake/look.mjs bake/views_look.json 256",
+    "test": "node bake/play_test.mjs",
+    "devices": "node bake/devices.mjs both",
+    "broll": "node bake/record.mjs bake/shots.json",
+    "gameplay": "node bake/play_record.mjs bake/plays.json",
+    "pack": "sh bake/pack.sh"
+  },
+  "devDependencies": {
+    "playwright": "1.60.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

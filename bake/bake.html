@@ -1,0 +1,77 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>bake</title></head>
+<body style="margin:0;background:#111">
+<canvas id="c" width="64" height="64"></canvas>
+<script type="module">
+import { PathTracer, makeSamples, makeSurfaceSamples, makeSkySamples, boxFlagWords } from './pt.js';
+import { BOXES, MAT, MAT_UV, BEACONS, GRID, UVAX } from '../game/world.js';
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
+const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+window.glInfo = { renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER), vendor: dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : '' };
+let pt = null;
+const tracer = () => (pt ||= new PathTracer(gl));
+async function put(name, data) {
+  const r = await fetch('/save/' + name, { method: 'PUT', body: data });
+  if (!r.ok) throw new Error('save failed ' + name);
+}
+window.progress = 0;
+// the painter's teaching set: n points (w x h), spp paths each
+window.runSamples = async ({ w, h, spp, perDraw = 4, seed = 1, tag = 'train' }) => {
+  const t0 = performance.now();
+  const { pos4, nrm4 } = makeSamples(w * h, seed);
+  const tSample = performance.now() - t0;
+  const y = await tracer().samples(pos4, nrm4, w, h, spp, perDraw, (p) => (window.progress = p));
+  const tTrace = performance.now() - t0 - tSample;
+  await put(`${tag}_x.f32`, new Blob([pos4, nrm4]));
+  await put(`${tag}_y.f32`, new Blob([y]));
+  let nan = 0; for (const v of y) if (!Number.isFinite(v)) nan++;
+  const mean = [0, 0, 0]; for (let i = 0; i < w * h; i++) for (let c = 0; c < 3; c++) mean[c] += y[i * 18 + c] / (w * h);
+  return { n: w * h, spp, tSample: Math.round(tSample), tTrace: Math.round(tTrace), nan, skyMean: mean };
+};
+// the surface painter's teaching set: n points (w x h) on the detailed world's faces, spp paths each
+window.runSurface = async ({ w, h, spp, perDraw = 4, seed = 1, tag = 'train' }) => {
+  const t0 = performance.now();
+  const { pos4, nrm4 } = makeSurfaceSamples(w * h, seed);
+  const tSample = performance.now() - t0;
+  const y = await tracer().surface(pos4, nrm4, w, h, spp, perDraw, (p) => (window.progress = p));
+  const tTrace = performance.now() - t0 - tSample;
+  await put(`surf_${tag}_x.f32`, new Blob([pos4, nrm4]));
+  await put(`surf_${tag}_y.f32`, new Blob([y]));
+  let nan = 0; for (const v of y) if (!Number.isFinite(v)) nan++;
+  return { n: w * h, spp, tSample: Math.round(tSample), tTrace: Math.round(tTrace), nan };
+};
+// the sky painter's teaching set
+window.runSky = async ({ w, h, seed = 1, tag = 'train' }) => {
+  const t0 = performance.now();
+  const dirs4 = makeSkySamples(w * h, seed);
+  const y = await tracer().sky(dirs4, w, h);
+  await put(`sky_${tag}_x.f32`, new Blob([dirs4]));
+  await put(`sky_${tag}_y.f32`, new Blob([y]));
+  return { n: w * h, ms: Math.round(performance.now() - t0) };
+};
+// what the trainers need to know about the world (the same facts the game builds its faces from)
+window.runBoxes = async () => {
+  const boxes = BOXES.map((b) => ({ min: b.min, max: b.max, m: b.m, e: b.e, glow: b.glow, flags: boxFlagWords(b) }));
+  const mats = MAT.map((m) => ({ name: m[0], uv: MAT_UV[m[0]], proxy: m[2] }));
+  await put('boxes.json', new Blob([JSON.stringify({ boxes, mats, uvax: UVAX, beacons: BEACONS, grid: GRID })]));
+  const crystals = BEACONS.map((_, k) => { const b = BOXES.find((x) => x.e === k); return [b.min, b.max]; });
+  await put('grid.json', new Blob([JSON.stringify({ ...GRID, crystals })]));
+  return { boxes: boxes.length };
+};
+// a path-traced picture from a camera
+window.runCamera = async ({ invViewProj, eye, w, h, t, beaconLight, glow, spp, perDraw = 4, name }) => {
+  const t0 = performance.now();
+  canvas.width = w; canvas.height = h;
+  const px = await tracer().camera({ invViewProj, eye, w, h, t, beaconLight, glow: glow || new Array(15).fill(0), spp, perDraw, onProgress: (p) => (window.progress = p) });
+  const c2 = document.createElement('canvas'); c2.width = w; c2.height = h;
+  const ctx = c2.getContext('2d'), img = ctx.createImageData(w, h);
+  for (let y = 0; y < h; y++) img.data.set(px.subarray((h - 1 - y) * w * 4, (h - y) * w * 4), y * w * 4);
+  ctx.putImageData(img, 0, 0);
+  const blob = await new Promise((ok) => c2.toBlob(ok, 'image/png'));
+  await put(name, blob);
+  return { ms: Math.round(performance.now() - t0) };
+};
+window.ready = true;
+</script>
+</body></html>
