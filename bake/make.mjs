@@ -1,8 +1,9 @@
-// Bakes and trains the three painters for the world in game/world.js and bake/truth.js, one step after another, on this machine:
-//   node bake/make.mjs            the full bake (about 6 minutes on an M1's GPU) and training (about 21 minutes of numpy)
-//   node bake/make.mjs --quick    a small bake and short training (about 5 minutes): to check a change end to end before the full one
+// Bakes and trains the four painters for the world in game/world.js, bake/truth.js and bake/forms.js, one step after another, on this
+// machine:
+//   node bake/make.mjs            the full bake (path tracing the shaped world on the GPU) and training (numpy on the CPU)
+//   node bake/make.mjs --quick    a small bake and short training: to check a change end to end before the full one
 // The trainers run in Python 3 with numpy (PYTHON=... to choose one; python3 by default). It writes game/painter.bin, surface.bin and
-// sky.bin; the old training sets are cleared first, so a set from another world is never mixed in.
+// sky.bin and shape.bin; the old training sets are cleared first, so a set from another world is never mixed in.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -23,11 +24,13 @@ if (check.status !== 0) { console.error(`✖ ${PY} has no numpy: install it (pip
 
 const data = path.join(ROOT, 'data');
 fs.mkdirSync(data, { recursive: true });
-for (const f of fs.readdirSync(data)) if (/^(train|val|surf_|sky_).*\.f32$/.test(f)) fs.rmSync(path.join(data, f));
+for (const f of fs.readdirSync(data)) if (/^(train|val|surf_|sky_|shape_).*\.f32$/.test(f)) fs.rmSync(path.join(data, f));
 
 const t0 = Date.now();
 run('node', 'bake/run.mjs', 'boxes');
 if (quick) {
+  run('node', 'bake/run.mjs', 'shapes', '131072', 'train', '1');
+  run('node', 'bake/run.mjs', 'shapes', '32768', 'val', '7');
   run('node', 'bake/run.mjs', 'samples', '512', '512', '128', 'train', '1');
   run('node', 'bake/run.mjs', 'samples', '128', '128', '512', 'val', '7');
   run('node', 'bake/run.mjs', 'surface', '1024', '512', '64', 'train0', '41');
@@ -36,17 +39,22 @@ if (quick) {
   run('node', 'bake/run.mjs', 'sky', '128', '128', 'val', '9');
   run(PY, '-I', 'bake/train.py', '1000');
   run(PY, '-I', 'bake/train_sky.py', '800');
+  run(PY, '-I', 'bake/train_shape.py', '600');
   run(PY, '-I', 'bake/train_surface.py', '1200');
 } else {
-  run('node', 'bake/run.mjs', 'samples', '1024', '1024', '256', 'train', '1');
-  run('node', 'bake/run.mjs', 'samples', '256', '256', '1024', 'val', '7');
-  for (let k = 0; k < 4; k++) run('node', 'bake/run.mjs', 'surface', '1024', '1024', '128', `train${k}`, String(41 + k));
-  run('node', 'bake/run.mjs', 'surface', '256', '256', '512', 'val', '29');
+  // (half the light paths a point the box world took: a shaped world costs about five times as much to trace)
+  run('node', 'bake/run.mjs', 'shapes', '262144', 'train', '1');
+  run('node', 'bake/run.mjs', 'shapes', '65536', 'val', '7');
+  run('node', 'bake/run.mjs', 'samples', '1024', '1024', '128', 'train', '1');
+  run('node', 'bake/run.mjs', 'samples', '256', '256', '512', 'val', '7');
+  for (let k = 0; k < 4; k++) run('node', 'bake/run.mjs', 'surface', '1024', '1024', '64', `train${k}`, String(41 + k));
+  run('node', 'bake/run.mjs', 'surface', '256', '256', '256', 'val', '29');
   run('node', 'bake/run.mjs', 'sky', '2048', '1024', 'train', '3');
   run('node', 'bake/run.mjs', 'sky', '256', '256', 'val', '9');
   run(PY, '-I', 'bake/train.py', '4000');
   run(PY, '-I', 'bake/train_sky.py', '3000');
+  run(PY, '-I', 'bake/train_shape.py', '3000');
   run(PY, '-I', 'bake/train_surface.py', '5000');
 }
-console.log(`\n✔ the painters are made (${((Date.now() - t0) / 60000).toFixed(1)} min): game/painter.bin, game/surface.bin, game/sky.bin`);
+console.log(`\n✔ the painters are made (${((Date.now() - t0) / 60000).toFixed(1)} min): game/painter.bin, game/surface.bin, game/sky.bin, game/shape.bin`);
 console.log('  next: npm run look (the same cameras against the path tracer) · npm test (the rules) · npm run serve (play it)');

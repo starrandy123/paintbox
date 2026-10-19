@@ -1,6 +1,6 @@
 // The game underneath: every rule is code. Light the five beacons after the sun goes down; the shades drift through stone toward you
 // and burn away in the beacons' light. The painters only paint.
-import { BOXES, BEACONS, BEACON_POWER, GLOW_LIT, PLAY, M, sunElevDeg } from './world.js';
+import { BOXES, BEACONS, BEACON_POWER, GLOW_LIT, PLAY, M, FORM, sunElevDeg } from './world.js';
 import { Renderer } from './render.js';
 import { m4, sub, add, scale, norm, len, dot } from './m4.js';
 
@@ -218,9 +218,10 @@ function boxModel(base, yaw, off, size, extraYaw = 0) {
   const o = [off[0] * c + off[2] * s, off[1], -off[0] * s + off[2] * c];
   return m4.trs(add(base, o), yaw + extraYaw, size);
 }
-// the moving things, as boxes: each part says what it is made of and its colour (the painter paints the rest)
+// the moving things, as boxes: each part says what it is made of, its colour and its form (the painters paint the rest: its shape too)
 function part(base, yaw, off, size, color, mat, extra = {}) {
-  return { model: boxModel(base, yaw, off, size, extra.spin || 0), color, mat, size, emissive: extra.emissive };
+  const c = Math.cos(yaw), s = Math.sin(yaw), pos = add(base, [off[0] * c + off[2] * s, off[1], -off[0] * s + off[2] * c]);
+  return { model: boxModel(base, yaw, off, size, extra.spin || 0), color, mat, size, emissive: extra.emissive, form: extra.form ? FORM[extra.form] : 0, pos, yaw: yaw + (extra.spin || 0) };
 }
 function dynamics() {
   const out = [];
@@ -228,20 +229,20 @@ function dynamics() {
   if (!flick && S.phase !== 'title') {
     const tunic = [0.13, 0.28, 0.5], skin = [0.82, 0.64, 0.5], dark = [0.08, 0.08, 0.1], scarf = [0.85, 0.32, 0.12];
     const legY = 0.33, swing = (k) => Math.sin(S.walk * 3.2 + k) * 0.18;
-    out.push(part(p, y, [-0.12, legY, swing(0)], [0.2, 0.62, 0.22], dark, M.cloth));
-    out.push(part(p, y, [0.12, legY, swing(Math.PI)], [0.2, 0.62, 0.22], dark, M.cloth));
-    out.push(part(p, y, [0, 0.95, 0], [0.56, 0.68, 0.34], tunic, M.cloth));
-    out.push(part(p, y, [0, 1.26, 0.02], [0.6, 0.12, 0.38], scarf, M.cloth));
-    out.push(part(p, y, [-0.36, 0.95, swing(Math.PI) * 0.8], [0.15, 0.56, 0.16], tunic, M.cloth));
-    out.push(part(p, y, [0.36, 0.95, swing(0) * 0.8], [0.15, 0.56, 0.16], tunic, M.cloth));
-    out.push(part(p, y, [0, 1.52, 0], [0.38, 0.38, 0.38], skin, M.skin));
+    out.push(part(p, y, [-0.12, legY, swing(0)], [0.2, 0.62, 0.22], dark, M.cloth, { form: 'limb' }));
+    out.push(part(p, y, [0.12, legY, swing(Math.PI)], [0.2, 0.62, 0.22], dark, M.cloth, { form: 'limb' }));
+    out.push(part(p, y, [0, 0.95, 0], [0.56, 0.68, 0.34], tunic, M.cloth, { form: 'torso' }));
+    out.push(part(p, y, [0, 1.26, 0.02], [0.6, 0.12, 0.38], scarf, M.cloth, { form: 'roll' }));
+    out.push(part(p, y, [-0.36, 0.95, swing(Math.PI) * 0.8], [0.15, 0.56, 0.16], tunic, M.cloth, { form: 'limb' }));
+    out.push(part(p, y, [0.36, 0.95, swing(0) * 0.8], [0.15, 0.56, 0.16], tunic, M.cloth, { form: 'limb' }));
+    out.push(part(p, y, [0, 1.52, 0], [0.38, 0.38, 0.38], skin, M.skin, { form: 'head' }));
     out.push(part(p, y, [0.0, 1.52, 0.2], [0.26, 0.07, 0.02], [0.05, 0.05, 0.06], M.cloth));
   }
   for (const s of S.shades) {
     const k = Math.max(0, Math.min(1, s.hp + 0.6)), bob = Math.sin(S.clock * 3 + s.wob) * 0.12, yaw = Math.atan2(S.p[0] - s.p[0], S.p[2] - s.p[2]);
     const base = [s.p[0], s.p[1] + bob, s.p[2]], body = [0.02, 0.015, 0.035], eyes = [7, 0.9, 1.6], veins = [0.05, 0.015, 0.11];
-    out.push(part(base, yaw, [0, 0.85, 0], [0.75 * k, 1.25 * k, 0.75 * k], body, M.shade, { emissive: veins }));
-    out.push(part(base, yaw, [0, 0.12, 0], [0.42 * k, 0.4 * k, 0.42 * k], body, M.shade, { emissive: veins, spin: S.clock * 2 }));
+    out.push(part(base, yaw, [0, 0.85, 0], [0.75 * k, 1.25 * k, 0.75 * k], body, M.shade, { emissive: veins, form: 'wraith' }));
+    out.push(part(base, yaw, [0, 0.12, 0], [0.42 * k, 0.4 * k, 0.42 * k], body, M.shade, { emissive: veins, spin: S.clock * 2, form: 'orb' }));
     out.push(part(base, yaw, [-0.16, 1.12, 0.38 * k], [0.13 * k, 0.08 * k, 0.03], [0, 0, 0], M.shade, { emissive: eyes }));
     out.push(part(base, yaw, [0.16, 1.12, 0.38 * k], [0.13 * k, 0.08 * k, 0.03], [0, 0, 0], M.shade, { emissive: eyes }));
   }
@@ -344,11 +345,11 @@ window.__MOSA_CONTROLS = {
     { id: 'jump', label: 'Jump', keys: ['Space'], touch: '#jump', kind: 'button' },
   ],
 };
-// the three painters: the light, the surfaces, the sky (painter.js), from their files
-const PAINTER_FILES = [['light', 'painter.bin'], ['surface', 'surface.bin'], ['sky', 'sky.bin']];
+// the four painters: the light, the surfaces, the sky and the shapes (painter.js), from their files
+const PAINTER_FILES = [['light', 'painter.bin'], ['surface', 'surface.bin'], ['sky', 'sky.bin'], ['shape', 'shape.bin']];
 let painterBytes = null, lost = false;
 function paintersFrom(gl, bytes, mod) {
-  return { light: mod.painterFrom(gl, bytes.light), surface: mod.surfaceFrom(gl, bytes.surface), sky: mod.skyFrom(gl, bytes.sky) };
+  return { light: mod.painterFrom(gl, bytes.light), surface: mod.surfaceFrom(gl, bytes.surface), sky: mod.skyFrom(gl, bytes.sky), shape: mod.shapeFrom(gl, bytes.shape) };
 }
 canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); lost = true; }, false);
 canvas.addEventListener('webglcontextrestored', async () => {
@@ -390,9 +391,9 @@ async function boot() {
     R_ = new Renderer(canvas, painter, { preserve: Q.has('preserve') });
     window.LP = { S, setMode, startPlay, step, draw, R: () => R_, painter, setCamera: (c) => (camOverride = c), sizeCanvas };
     // everything the painters learned: their networks' weights, their feature textures and their grids
-    const hd = [painter.light.head, painter.surface.head, painter.sky.head];
+    const hd = [painter.light.head, painter.surface.head, painter.sky.head, painter.shape.head];
     const learned = hd.reduce((n, h) => n + h.weights + (h.textureValues || 0) + (h.gridValues || 0), 0);
-    const mb = (painter.light.bytes + painter.surface.bytes + painter.sky.bytes) / 1e6;
+    const mb = (painter.light.bytes + painter.surface.bytes + painter.sky.bytes + painter.shape.bytes) / 1e6;
     $('netsize').textContent = `${(learned / 1e6).toFixed(1)}M learned numbers · ${mb.toFixed(1)} MB`;
     setMode(S.mode);
     sizeCanvas(); addEventListener('resize', sizeCanvas); addEventListener('mosa:device', sizeCanvas);

@@ -1,7 +1,7 @@
 {
   "name": "paintbox",
-  "version": "1.0.0",
-  "description": "Code keeps the world as boxes; small AI painters paint every pixel in the browser, on any GPU. Bake, train and ship your own painted world.",
+  "version": "2.0.0",
+  "description": "The code keeps the world as boxes; four small AI painters paint every pixel, the shapes too, in the browser, on any GPU.",
   "type": "module",
   "license": "MIT",
   "scripts": {

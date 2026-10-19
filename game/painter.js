@@ -169,8 +169,9 @@ const vec3 FAR_SUN[${n}] = vec3[${n}](${pick(3)});
 const vec3 FAR_EM[${n}] = vec3[${n}](${pick(6)});`; })()}
 // m: material; uv: its pattern coordinates (matUV); ef: edgeFeatures; ltan: the sun in the face's frame (T, B, N); ny: the face's N.y;
 // q: the point lifted off the face (P + N * P_OFF), where the wear grid is read, blended toward q2 by k2 (beyond the painters' volume
-// the field's wear is the open field's, not the edge stretched outward); grid 0 for a thing that moves (it has no wear)
-void surfacePaint(int m, vec2 uv, vec4 ef, vec3 ltan, float ny, vec3 q, vec3 q2, float k2, float grid, out vec3 wInd, out vec3 wSun, out vec3 wEm) {
+// the field's wear is the open field's, not the edge stretched outward); grid 0 for a thing that moves (it has no wear); extra: how
+// tucked in a shaped surface is there, and 1 on a shaped surface (a box's face: 0, 0)
+void surfacePaint(int m, vec2 uv, vec4 ef, vec3 ltan, float ny, vec3 q, vec3 q2, float k2, float grid, vec4 extra, out vec3 wInd, out vec3 wSun, out vec3 wEm) {
   vec3 tc = vec3(uv / MAT_UV[m].yz, float(m));
   vec4 x[${ins}];
   x[0] = texture(uSL0, tc) * SL_S0 + SL_O0;
@@ -180,6 +181,7 @@ void surfacePaint(int m, vec2 uv, vec4 ef, vec3 ltan, float ny, vec3 q, vec3 q2,
   vec4 g = texture(uSG, ((q - P_MIN) / P_H1 + 0.5) / P_N1);
   if (k2 > 0.0) g = mix(g, texture(uSG, ((q2 - P_MIN) / P_H1 + 0.5) / P_N1), k2);
   x[4] = grid > 0.5 ? g * SG_S + SG_O : vec4(0.0);
+${ins > 5 ? '  x[5] = extra;' : '  // (this surface painter was taught on box faces only: it reads no extra)'}
   vec4 h1[${hid}], h2[${hid}], z[${outs}];
   for (int o = 0; o < ${hid}; o++) { vec4 a = SB1[o]; for (int i = 0; i < ${ins}; i++) a += SM1[o * ${ins} + i] * x[i]; h1[o] = max(a, 0.0); }
   for (int o = 0; o < ${hid}; o++) { vec4 a = SB2[o]; for (int i = 0; i < ${hid}; i++) a += SM2[o * ${hid} + i] * h1[i]; h2[o] = max(a, 0.0); }
@@ -248,6 +250,187 @@ vec3 skyPaint(vec3 d, float t) {
   for (int o = 0; o < ${hid}; o++) { vec4 a = KB2[o]; for (int i = 0; i < ${hid}; i++) a += KM2[o * ${hid} + i] * h1[i]; h2[o] = max(a, 0.0); }
   vec4 z = KB3[0]; for (int i = 0; i < ${hid}; i++) z += KM3[i] * h2[i];
   return ${head.knee.toFixed(4)} * (exp(min(z.xyz, 14.0)) - 1.0) / exposureAt(t);
+}
+`;
+}
+
+// ---- the shape painter: for every form, a grid of 8 learned features in the form's own frame, and one tiny network for them all.
+// Feature 0 alone is a coarse distance the trace steps by; the network gives the surface itself. Every form's grid is packed into one
+// pair of 3D textures (features 0-3, 4-7), so one shader reads any form. ----
+export function shapeFrom(gl, buf) {
+  const u8 = new Uint8Array(buf);
+  if (String.fromCharCode(...u8.subarray(0, 4)) !== 'LPG1') throw new Error('not a shape painter file');
+  const hlen = new DataView(buf).getUint32(4, true);
+  const head = JSON.parse(new TextDecoder().decode(u8.subarray(8, 8 + hlen)));
+  let off = 8 + hlen; off += (4 - (off % 4)) % 4;
+  const base = off, NF = head.forms.length;
+  // each form's grid, stored with one more point along an axis that repeats (its first again), in layers of shelves 256 wide
+  const vols = [];
+  let end = base;
+  head.forms.forEach((fm, f) => {
+    if (!fm) return;
+    const dims = fm.n.map((n, a) => n + (fm.wrap[a] ? 1 : 0));
+    vols.push({ fm, f, dims });
+    end = Math.max(end, base + fm.at + fm.n[0] * fm.n[1] * fm.n[2] * 8);
+  });
+  const W = 256, layers = [];
+  for (const v of [...vols].sort((a, b) => b.dims[2] - a.dims[2])) {
+    let placed = false;
+    for (const L of layers) {
+      if (v.dims[2] > L.depth) continue;
+      if (L.x + v.dims[0] <= W && v.dims[1] <= L.shelf + 0) { v.o = [L.x, L.y, L.z]; L.x += v.dims[0]; placed = true; break; }
+      if (L.y + L.shelf + v.dims[1] <= 256 && v.dims[0] <= W) { L.y += L.shelf; L.x = v.dims[0]; L.shelf = v.dims[1]; v.o = [0, L.y, L.z]; placed = true; break; }
+    }
+    if (!placed) { const z = layers.reduce((s2, L) => s2 + L.depth, 0); layers.push({ z, depth: v.dims[2], x: v.dims[0], y: 0, shelf: v.dims[1] }); v.o = [0, 0, z]; }
+  }
+  const AW = W, AH = Math.max(...vols.map((v) => v.o[1] + v.dims[1])), AD = layers.reduce((s2, L) => s2 + L.depth, 0);
+  const A = new Uint8Array(AW * AH * AD * 4), Bt = new Uint8Array(AW * AH * AD * 4);
+  const table = new Float32Array(NF * 8 * 4);
+  for (const v of vols) {
+    const { fm } = v, [nx, ny, nz] = fm.n, cells = nx * ny * nz, a = base + fm.at;
+    const srcA = new Uint8Array(buf, a, cells * 4), srcB = new Uint8Array(buf, a + cells * 4, cells * 4);
+    for (let z = 0; z < v.dims[2]; z++) for (let y = 0; y < v.dims[1]; y++) for (let x = 0; x < v.dims[0]; x++) {
+      const sx = x % nx, sy = y % ny, sz = z % nz, si = ((sz * ny + sy) * nx + sx) * 4;
+      const di = (((v.o[2] + z) * AH + v.o[1] + y) * AW + v.o[0] + x) * 4;
+      for (let k = 0; k < 4; k++) { A[di + k] = srcA[si + k]; Bt[di + k] = srcB[si + k]; }
+    }
+    const wrapBits = (fm.wrap[0] ? 1 : 0) + (fm.wrap[1] ? 2 : 0) + (fm.wrap[2] ? 4 : 0);
+    // (the file's scales are per step of 255; a texture hands the shader its bytes as 0..1)
+    table.set([...v.o, wrapBits, ...fm.n, 0, ...fm.lo, 0, ...fm.sp, 0, ...fm.scale.slice(0, 4).map((x) => x * 255), ...fm.offset.slice(0, 4), ...fm.scale.slice(4, 8).map((x) => x * 255), ...fm.offset.slice(4, 8)], v.f * 32);
+  }
+  const tex = (data) => {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_3D, t);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, AW, AH, AD, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, k, gl.CLAMP_TO_EDGE);
+    return t;
+  };
+  off = end; off += (4 - (off % 4)) % 4;
+  const ubo = new Float32Array(buf, off, head.uboFloats);
+  const ub = gl.createBuffer(), tb = gl.createBuffer();
+  gl.bindBuffer(gl.UNIFORM_BUFFER, ub); gl.bufferData(gl.UNIFORM_BUFFER, ubo, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.UNIFORM_BUFFER, tb); gl.bufferData(gl.UNIFORM_BUFFER, table, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+  return {
+    head, size: [AW, AH, AD], tex: [tex(A), tex(Bt)], ubo: ub, table: tb, bytes: buf.byteLength,
+    // the grids to units 13 and 14, the network to block binding 3, the forms' table to 4, for program p
+    bind(p) {
+      gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_3D, this.tex[0]);
+      gl.activeTexture(gl.TEXTURE14); gl.bindTexture(gl.TEXTURE_3D, this.tex[1]);
+      gl.uniform1i(gl.getUniformLocation(p, 'uGA'), 13); gl.uniform1i(gl.getUniformLocation(p, 'uGB'), 14);
+      gl.uniform3fv(gl.getUniformLocation(p, 'uGSize'), this.size);
+      const bi = gl.getUniformBlockIndex(p, 'Shape');
+      if (bi !== gl.INVALID_INDEX) { gl.uniformBlockBinding(p, bi, 3); gl.bindBufferBase(gl.UNIFORM_BUFFER, 3, this.ubo); }
+      const ti = gl.getUniformBlockIndex(p, 'ShapeForms');
+      if (ti !== gl.INVALID_INDEX) { gl.uniformBlockBinding(p, ti, 4); gl.bindBufferBase(gl.UNIFORM_BUFFER, 4, this.table); }
+    },
+  };
+}
+
+// Its GLSL (after GLSL_COMMON, whose formCanon it reads a box through). f: the form; x: a point in the box's own axes, from its centre;
+// h: the box's half sizes there.
+export function shapeGLSL(head) {
+  const hid = head.hidden / 4, ins = head.inputs / 4, NF = head.forms.length;
+  return `
+uniform highp sampler3D uGA;
+uniform highp sampler3D uGB;
+uniform vec3 uGSize;
+layout(std140) uniform Shape { mat4 GM1[${hid * ins}]; mat4 GM2[${hid * hid}]; mat4 GM3[${hid}]; vec4 GB1[${hid}]; vec4 GB2[${hid}]; vec4 GB3[1]; };
+// per form: where its grid starts in the textures (and which axes repeat), its points, its first point and spacing in its frame, the
+// two textures' scales and offsets
+layout(std140) uniform ShapeForms { vec4 SF[${NF * 8}]; };
+vec3 shapeTC(int f, vec3 c) {
+  vec4 o = SF[f * 8], n = SF[f * 8 + 1];
+  vec3 g = (c - SF[f * 8 + 2].xyz) / SF[f * 8 + 3].xyz;
+  float wb = o.w;
+  g.x = mod(wb, 2.0) > 0.5 ? mod(g.x, n.x) : clamp(g.x, 0.0, n.x - 1.0);
+  g.y = mod(floor(wb / 2.0), 2.0) > 0.5 ? mod(g.y, n.y) : clamp(g.y, 0.0, n.y - 1.0);
+  g.z = wb > 3.5 ? mod(g.z, n.z) : clamp(g.z, 0.0, n.z - 1.0);
+  return (o.xyz + g + 0.5) / uGSize;
+}
+// the coarse distance (feature 0): never longer than the real one
+float shapeCoarse(int f, vec3 x, vec3 h) { float k; vec3 c = formCanon(f, x, h, k); return (texture(uGA, shapeTC(f, c)).r * SF[f * 8 + 4].r + SF[f * 8 + 5].r) * k; }
+// the network's distance: the surface itself
+float shapeFine(int f, vec3 x, vec3 h) {
+  float k; vec3 c = formCanon(f, x, h, k);
+  vec3 tc = shapeTC(f, c);
+  vec4 q[${ins}];
+  q[0] = texture(uGA, tc) * SF[f * 8 + 4] + SF[f * 8 + 5];
+  q[1] = texture(uGB, tc) * SF[f * 8 + 6] + SF[f * 8 + 7];
+  vec4 h1[${hid}], h2[${hid}];
+  for (int o = 0; o < ${hid}; o++) { vec4 a = GB1[o]; for (int i = 0; i < ${ins}; i++) a += GM1[o * ${ins} + i] * q[i]; h1[o] = max(a, 0.0); }
+  for (int o = 0; o < ${hid}; o++) { vec4 a = GB2[o]; for (int i = 0; i < ${hid}; i++) a += GM2[o * ${hid} + i] * h1[i]; h2[o] = max(a, 0.0); }
+  vec4 z = GB3[0]; for (int i = 0; i < ${hid}; i++) z += GM3[i] * h2[i];
+  return z.x * ${head.outScale.toFixed(4)} * k;
+}
+// the normal by forward differences, d0 the distance at x already in hand (three more of the network instead of four)
+vec3 shapeNormalAt(int f, vec3 x, vec3 h, float d0) {
+  const float e = 8e-3;   // (the network is good to half a millimetre: differences over less than a centimetre would be its noise)
+  return normalize(vec3(shapeFine(f, x + vec3(e, 0.0, 0.0), h), shapeFine(f, x + vec3(0.0, e, 0.0), h), shapeFine(f, x + vec3(0.0, 0.0, e), h)) - d0);
+}
+vec3 shapeNormal(int f, vec3 x, vec3 h) {
+  const vec2 e = vec2(1.0, -1.0) * 8e-3;
+  return normalize(e.xyy * shapeFine(f, x + e.xyy, h) + e.yyx * shapeFine(f, x + e.yyx, h) + e.yxy * shapeFine(f, x + e.yxy, h) + e.xxx * shapeFine(f, x + e.xxx, h));
+}
+// how tucked in a point of the shape is (the surface painter's cue), off the coarse distance at three heights over it
+float shapeAO(int f, vec3 x, vec3 h, vec3 n) {
+  float a = 0.5 * (0.03 - shapeCoarse(f, x + n * 0.03, h)) / 0.03 + 0.3 * (0.09 - shapeCoarse(f, x + n * 0.09, h)) / 0.09 + 0.2 * (0.25 - shapeCoarse(f, x + n * 0.25, h)) / 0.25;
+  return clamp(a, 0.0, 1.0);
+}
+// a ray (ro, rd, in the box's axes) through its shell lo..hi: where it meets the shape (x), and the shell's face normal when that is
+// where (n; else zero). Steps by the coarse distance until it is near, then lets the network place the surface.
+bool shapeTrace(int f, vec3 ro, vec3 rd, vec3 lo, vec3 hi, vec3 h, out vec3 x, out vec3 n) {
+  n = vec3(0.0);
+  vec3 inv = 1.0 / (sign(rd) * max(abs(rd), vec3(1e-7)));
+  vec3 ta = (lo - ro) * inv, tb = (hi - ro) * inv, mn = min(ta, tb), mx = max(ta, tb);
+  float t0 = max(max(mn.x, mn.y), mn.z), t1 = min(min(mx.x, mx.y), mx.z);
+  if (t1 <= max(t0, 0.0)) return false;
+  float t = max(t0, 0.0);
+  float d = shapeCoarse(f, ro + rd * t, h);
+  if (d < 0.0 && t0 > 0.0) {
+    // solid where it enters the shell (the network says so too): the shell's own face
+    x = ro + rd * t;
+    float df = shapeFine(f, x, h);
+    if (df < 0.0) { n = t0 == mn.x ? vec3(-sign(rd.x), 0, 0) : (t0 == mn.y ? vec3(0, -sign(rd.y), 0) : vec3(0, 0, -sign(rd.z))); return true; }
+    d = df;
+  }
+  for (int i = 0; i < 72; i++) {
+    if (d < 0.006) break;
+    t += d * 0.9;
+    if (t > t1) return false;
+    d = shapeCoarse(f, ro + rd * t, h);
+  }
+  // one step by the network places the surface (the coarse distance had it within 6 mm); a step that would move it far says the
+  // coarse distance was wrong there, and there is no surface
+  float df = shapeFine(f, ro + rd * t, h);
+  t += df;
+  if (abs(df) > 0.012 || t > t1 + 1e-3 || t < 0.0) return false;
+  x = ro + rd * t;
+  return true;
+}
+// the same on the coarse distance alone (to a centimetre): the trace pass and the sun's shadow map (the paint pass lets the network
+// place the surface, once a pixel). fn: the shell's own face normal where the shape is solid at the shell's face, else zero
+bool shapeTraceCoarse(int f, vec3 ro, vec3 rd, vec3 lo, vec3 hi, vec3 h, out vec3 x, out vec3 fn) {
+  fn = vec3(0.0);
+  vec3 inv = 1.0 / (sign(rd) * max(abs(rd), vec3(1e-7)));
+  vec3 ta = (lo - ro) * inv, tb = (hi - ro) * inv, mn = min(ta, tb), mx = max(ta, tb);
+  float t0 = max(max(mn.x, mn.y), mn.z), t1 = min(min(mx.x, mx.y), mx.z);
+  if (t1 <= max(t0, 0.0)) return false;
+  float t = max(t0, 0.0);
+  float d = shapeCoarse(f, ro + rd * t, h);
+  if (d < 0.0) {
+    if (t0 <= 0.0) return false;   // (the eye is inside the shape)
+    x = ro + rd * t; fn = t0 == mn.x ? vec3(-sign(rd.x), 0, 0) : (t0 == mn.y ? vec3(0, -sign(rd.y), 0) : vec3(0, 0, -sign(rd.z)));
+    return true;
+  }
+  for (int i = 0; i < 48; i++) {
+    if (d < 0.01) { x = ro + rd * t; return true; }
+    t += d * 0.9;
+    if (t > t1) return false;
+    d = shapeCoarse(f, ro + rd * t, h);
+  }
+  return false;
 }
 `;
 }

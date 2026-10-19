@@ -1,7 +1,8 @@
 # Fits the surface painter: what every point of the detailed world looks like, painted from what the code knows about the boxes.
 #   - a tiled feature texture per material (8 features, 256 x 256 over the material's tile): the stone, the joints, the grain, the runes
 #   - a half-metre grid of 4 features over the world: the world's own wear (damp, moss, rain marks) and what the light painter misses
-#   - a 20 -> 16 -> 16 -> 9 network: from those features, the face's edges and the sun's direction, how the point answers each light:
+#   - a 24 -> 16 -> 16 -> 9 network: from those features, the face's edges, the sun's direction and (on a shaped surface) how tucked in
+#     the point is, how the point answers each light:
 #       colour = wInd * (the light painter's light) + wSun * (the sun, where the code's shadow map lets it through) + wEm * (its glow)
 # Plain numpy; run with Blender's bundled Python:
 #   /Applications/Blender.app/Contents/Resources/5.2/python/bin/python3.13 -I bake/train_surface.py [steps]
@@ -21,7 +22,7 @@ WORLD = json.load(open(os.path.join(ROOT, 'data', 'boxes.json')))
 GRID = light.GRID
 STEPS = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
 BATCH = 65536
-R, F, FG, H, NIN, NOUT, NOUT_PAD = 256, 8, 4, 16, 20, 9, 12
+R, F, FG, H, NIN, NOUT, NOUT_PAD = 256, 8, 4, 16, 24, 9, 12
 WS = np.array([0.1] * 3 + [0.1] * 3 + [1.0] * 3, np.float32)   # the outputs' scales: light taken in, sun taken in, glow
 KNEE = 0.02                                                     # the loss is on log(1 + radiance x exposure / KNEE)
 BEACON_POWER, GLOW_LIT = 9.0, 0.3
@@ -33,6 +34,7 @@ BMAX = np.array([b['max'] for b in BOX], np.float32)
 BM = np.array([b['m'] for b in BOX], np.int64)
 BGLOW = np.array([b['glow'] for b in BOX], np.int64)
 BFL = np.array([b['flags'] for b in BOX], np.int64)
+BFORM = np.array([b.get('form', 0) for b in BOX], np.int64)   # a shaped box's surface: traced in its shell, its own form's edges
 MUV = np.array([(m['uv'] + [0, 0, 0, 0])[:4] for m in WORLD['mats']], np.float32)   # mode, tile u, tile v, vTop
 NMAT = len(WORLD['mats'])
 COL = np.array([b['color'] for b in WORLD['beacons']], np.float32)
@@ -106,9 +108,12 @@ def lat_corners(m, uv):
 def load(tag):
     x = np.fromfile(os.path.join(ROOT, 'data', f'surf_{tag}_x.f32'), dtype=np.float32)
     y = np.fromfile(os.path.join(ROOT, 'data', f'surf_{tag}_y.f32'), dtype=np.float32)
-    n = y.size // 23
+    n = y.size // 24
     pos4, nrm4 = x[: n * 4].reshape(n, 4), x[n * 4:].reshape(n, 4)
-    return pos4[:, :3].copy(), nrm4[:, :3].copy(), pos4[:, 3].copy(), nrm4[:, 3].astype(np.int64), y.reshape(n, 23)
+    y = y.reshape(n, 24)
+    ok = np.isfinite(y).all(1) & np.isfinite(pos4).all(1) & np.isfinite(nrm4).all(1)
+    if (~ok).sum(): print(f'  {tag}: {(~ok).sum()} of {n} points are not all numbers: left out', flush=True)
+    return pos4[ok, :3].copy(), nrm4[ok, :3].copy(), pos4[ok, 3].copy(), nrm4[ok, 3].astype(np.int64), y[ok]
 
 
 def light_predict(p, n, t):
@@ -127,6 +132,9 @@ class Set:
         self.N = len(self.p)
         self.sky, self.sun, self.vis, self.em = y[:, 0:3].copy(), y[:, 3:6].copy(), y[:, 6].copy(), y[:, 7].copy()
         self.bk = y[:, 8:23].reshape(-1, 5, 3).astype(np.float16)   # (half precision: four million points have to fit beside everything else)
+        # what the game tells the painter about a shaped surface: how tucked in the point is (off its form), and that it is shaped
+        shaped = (BFORM[self.bi] > 0).astype(np.float32)
+        self.extra = np.stack([y[:, 23] * shaped, shaped, np.zeros_like(shaped), np.zeros_like(shaped)], 1).astype(np.float32)
         del y
         self.m, self.uv, self.ef, T, B = geometry(self.p, self.n, self.bi)
         sd = sun_dir(self.t)
@@ -224,18 +232,27 @@ class DynSet:
             sel = np.nonzero(which == j)[0]
             sz = np.array(DYN_PARTS[nm], np.float32)
             size[sel] = sz[r.integers(0, len(sz), len(sel))]
-        a = r.integers(0, 3, n); side = r.integers(0, 2, n)
-        ua, va = UA[a], VA[a]
         rows = np.arange(n)
+        # a part with a form (85%): a point on its rounded surface, facing any way, its pattern read along the axis it faces most
+        # (as the game's paint pass reads it); the rest: a box's face, as a part with no form is drawn
+        shaped = r.random(n) < 0.85
+        v = r.standard_normal((n, 3)); v /= np.linalg.norm(v, axis=1, keepdims=True)
+        a_face = r.integers(0, 3, n); side = r.integers(0, 2, n)
+        a = np.where(shaped, np.argmax(np.abs(v), 1), a_face)
+        Nl = np.zeros((n, 3), np.float32); Nl[rows, a_face] = np.where(side == 1, 1.0, -1.0)
+        Nl = np.where(shaped[:, None], v, Nl).astype(np.float32)
+        ua, va = UA[a], VA[a]
         vtop = np.where(a == 1, MUV[mi, 3], 0.0)
         uv = np.stack([r.random(n) * size[rows, ua], r.random(n) * size[rows, va] + vtop], 1).astype(np.float32)
         lo = np.stack([np.zeros(n), vtop], 1); hi = np.stack([size[rows, ua], size[rows, va] + vtop], 1)
         d = np.stack([uv[:, 0] - lo[:, 0], hi[:, 0] - uv[:, 0], uv[:, 1] - lo[:, 1], hi[:, 1] - uv[:, 1]], 1)
         r6, r30 = 1 - np.clip(d / 0.06, 0, 1), 1 - np.clip(d / 0.3, 0, 1)
         self.ef = np.stack([r6[:, 1] - r6[:, 0], r6[:, 3] - r6[:, 2], np.zeros(n), r30.max(1)], 1).astype(np.float32)
-        dE = d.min(1)
-        # the face's frame in the part's own space, then turned by a random heading (moving things turn about the vertical)
-        Nl = np.zeros((n, 3), np.float32); Nl[rows, a] = np.where(side == 1, 1.0, -1.0)
+        self.ef[shaped] = 0.0
+        dE = np.where(shaped, 0.3, d.min(1))
+        self.extra = np.stack([np.zeros(n), shaped.astype(np.float32), np.zeros(n), np.zeros(n)], 1).astype(np.float32)
+        # the frame (T, B as faceTB gives them for the axis it faces most), in the part's own space, then turned by a random heading
+        # (moving things turn about the vertical)
         Tl, Bl = TAX[a], BAX[a]
         yaw = r.random(n) * 2 * np.pi
         cy, sy = np.cos(yaw), np.sin(yaw)
@@ -301,7 +318,7 @@ def inputs(S, sel):
     else:
         gi, gw = light.corners(S.p[sel], S.n[sel], GRID['h1'], GRID['n1'])
         gs = np.einsum('bc,bcf->bf', gw, P['GS'][gi])
-    x = np.concatenate([lat, S.ef[sel], S.ltan[sel], S.ny[sel], gs], 1)
+    x = np.concatenate([lat, S.ef[sel], S.ltan[sel], S.ny[sel], gs, S.extra[sel]], 1)
     return x, (li, lw, gi, gw)
 
 

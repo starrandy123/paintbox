@@ -3,6 +3,7 @@
 //   node bake/run.mjs samples <w> <h> <spp> [tag]  the painter's teaching set -> data/<tag>_x.f32, data/<tag>_y.f32
 //   node bake/run.mjs surface <w> <h> <spp> [tag] [seed]  the surface painter's set -> data/surf_<tag>_x.f32, _y.f32
 //   node bake/run.mjs sky <w> <h> [tag] [seed]      the sky painter's set -> data/sky_<tag>_x.f32, _y.f32
+//   node bake/run.mjs shapes [n] [tag] [seed]       the shape painter's set: each form's truth -> data/shape_<tag>_x.f32, _y.f32
 //   node bake/run.mjs boxes                         the world's facts for the trainers -> data/boxes.json
 //   node bake/run.mjs camera <views.json> <spp>    path-traced pictures -> data/<name>.png
 import fs from 'node:fs';
@@ -32,6 +33,10 @@ try {
   } else if (cmd === 'sky') {
     const [w, h, tag = 'train', seed = '1'] = args;
     const r = await page.evaluate((o) => window.runSky(o), { w: +w, h: +h, tag, seed: +seed });
+    console.log('\n', JSON.stringify(r));
+  } else if (cmd === 'shapes') {
+    const [n = '262144', tag = 'train', seed = '1'] = args;
+    const r = await page.evaluate((o) => window.runShapes(o), { n: +n, tag, seed: +seed });
     console.log('\n', JSON.stringify(r));
   } else if (cmd === 'boxes') {
     console.log(JSON.stringify(await page.evaluate(() => window.runBoxes())));

@@ -4,8 +4,8 @@
 //               its face it is, how near the face's edges, which way it faces, where the sun reaches. The stone, the wood, the moss,
 //               the runes, the crystals' glow, the bounced light and the sky are all painted. The code adds only the camera: haze,
 //               exposure and the glow around bright things.
-import { BOXES, BEACONS, GLSL_COMMON, GRID, edgeFlags } from './world.js';
-import { painterGLSL, surfaceGLSL, skyGLSL } from './painter.js';
+import { BOXES, BEACONS, GLSL_COMMON, GRID, FORMS, edgeFlags, formFrame } from './world.js';
+import { painterGLSL, surfaceGLSL, skyGLSL, shapeGLSL } from './painter.js';
 import { m4 } from './m4.js';
 
 const POISSON = [[-0.613, 0.617], [0.17, -0.04], [-0.299, -0.792], [0.645, 0.493], [-0.651, -0.159], [0.42, -0.81], [-0.09, 0.42], [0.95, -0.12], [0.15, 0.92], [-0.95, 0.27], [0.55, 0.1], [-0.2, -0.33]];
@@ -89,7 +89,7 @@ void main() {
   if (abs(ln.y) > 0.5) { uv.y += MAT_UV[uDynMat].w; lo.y += MAT_UV[uDynMat].w; hi.y += MAT_UV[uDynMat].w; }
   vec3 T, B; faceTB(ln, T, B);
   T = normalize(mat3(uModel) * T); B = normalize(mat3(uModel) * B);
-  surfacePaint(uDynMat, uv, edgeFeatures(uv, lo, hi, vec4(1.0)), vec3(dot(uSunDir, T), dot(uSunDir, B), dot(uSunDir, N)), N.y, P, P, 0.0, 0.0, wInd, wSun, wEm);
+  surfacePaint(uDynMat, uv, edgeFeatures(uv, lo, hi, vec4(1.0)), vec3(dot(uSunDir, T), dot(uSunDir, B), dot(uSunDir, N)), N.y, P, P, 0.0, 0.0, vec4(0.0), wInd, wSun, wEm);
   L = uFlatColor * (wInd * Eind + wSun * sunC) + wEm * uEmissive;
 #else
   // the world: the light painter's light from the atlas it repainted this frame (darkened where the player and the shades stand)
@@ -121,13 +121,193 @@ void main() {
   vec3 T, B; faceTB(N, T, B);
   vec2 uv = matUV(m, P, N, vBMin);
   vec4 ef = edgeFeatures(uv, matUV(m, vBMin, N, vBMin), matUV(m, vBMax, N, vBMin), vFlags);
-  surfacePaint(m, uv, ef, vec3(dot(uSunDir, T), dot(uSunDir, B), dot(uSunDir, N)), N.y, P + N * P_OFF, OPEN_FIELD + N * P_OFF, far, 1.0, wInd, wSun, wEm);
+  surfacePaint(m, uv, ef, vec3(dot(uSunDir, T), dot(uSunDir, B), dot(uSunDir, N)), N.y, P + N * P_OFF, OPEN_FIELD + N * P_OFF, far, 1.0, vec4(0.0), wInd, wSun, wEm);
   L = wInd * Eind + wSun * sunC;
   if (glowK >= 0) L += wEm * uGlow[glowK];
 #endif
   L = applyFog(L, uEye, P, uT);
   oColor = vec4(tonemap(L * exposureAt(uT)), 1.0);
 #endif
+}`;
+
+// ---- the shaped boxes, in two passes. The trace: each one's shell (its box and as far past it as its form reaches) drawn as a cube,
+// the learned shape traced inside it, and the nearest hit at each pixel kept (which box, its depth). The paint: once a pixel, the
+// painters at that hit. One instance a box (or a moving part): where it is, which way its axes lie, its half sizes and shell, its form,
+// what it is made of. ----
+const VS_SHAPE = `#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 iCenter; layout(location = 2) in vec2 iRot; layout(location = 3) in vec3 iHalf;
+layout(location = 4) in vec3 iLo; layout(location = 5) in vec3 iHi; layout(location = 6) in vec4 iMisc; layout(location = 7) in vec2 iId;
+uniform mat4 uViewProj;
+out vec3 vWorld;
+flat out vec3 vCenter; flat out vec2 vRot; flat out vec3 vHalf; flat out vec3 vLo; flat out vec3 vHi; flat out vec4 vMisc; flat out vec2 vId;
+// a box's own axes to the world's: x and z swapped for a box longer along z (iMisc.x), else turned by its heading (iRot = cos, sin)
+vec3 fromLocalV(vec3 v) { return iMisc.x > 0.5 ? v.zyx : vec3(iRot.x * v.x + iRot.y * v.z, v.y, -iRot.y * v.x + iRot.x * v.z); }
+void main() {
+  vec3 l = mix(-iHalf - iLo, iHalf + iHi, aPos + 0.5);
+  vec3 w = iCenter + fromLocalV(l);
+  vWorld = w; vCenter = iCenter; vRot = iRot; vHalf = iHalf; vLo = iLo; vHi = iHi; vMisc = iMisc; vId = iId;
+  gl_Position = uViewProj * vec4(w, 1.0);
+}`;
+const LOCAL = `
+vec3 toLocalR(vec3 v, vec2 rot, bool swap) { return swap ? v.zyx : vec3(rot.x * v.x - rot.y * v.z, v.y, rot.y * v.x + rot.x * v.z); }
+vec3 fromLocalR(vec3 v, vec2 rot, bool swap) { return swap ? v.zyx : vec3(rot.x * v.x + rot.y * v.z, v.y, -rot.y * v.x + rot.x * v.z); }`;
+const fsShapeTrace = (shapeG, variant) => `#version 300 es
+#define SHADOW ${variant === 'shadow' ? 1 : 0}
+precision highp float; precision highp int; precision highp sampler3D;
+${GLSL_COMMON}
+${shapeG}
+${LOCAL}
+uniform mat4 uViewProj; uniform vec3 uEye; uniform vec3 uRayDir;
+in vec3 vWorld;
+flat in vec3 vCenter; flat in vec2 vRot; flat in vec3 vHalf; flat in vec3 vLo; flat in vec3 vHi; flat in vec4 vMisc; flat in vec2 vId;
+out vec4 oId;
+void main() {
+  bool swap = vMisc.x > 0.5;
+  // the ray, in the box's own axes: from the eye (the camera), or along the sun's direction (the shadow map)
+#if SHADOW
+  vec3 rd = toLocalR(uRayDir, vRot, swap), ro = toLocalR(vWorld - vCenter, vRot, swap) - rd * 60.0;
+#else
+  vec3 ro = toLocalR(uEye - vCenter, vRot, swap), rd = normalize(toLocalR(vWorld - uEye, vRot, swap));
+#endif
+  vec3 x, fn;
+  if (!shapeTraceCoarse(int(vId.x + 0.5), ro, rd, -vHalf - vLo, vHalf + vHi, vHalf, x, fn)) discard;
+  vec4 clip = uViewProj * vec4(vCenter + fromLocalR(x, vRot, swap), 1.0);
+  gl_FragDepth = clamp(clip.z / clip.w * 0.5 + 0.5, 0.0, 1.0);
+  // which box (+1, over two bytes), and when the hit is the shell's own face, which face (1-6)
+  float id = vId.y + 1.0, face = dot(abs(fn), vec3(1.0, 3.0, 5.0)) + (dot(fn, vec3(1.0)) > 0.0 ? 1.0 : 0.0);
+  oId = vec4(mod(id, 256.0), floor(id / 256.0), dot(fn, fn) > 0.5 ? face : 0.0, 255.0) / 255.0;
+}`;
+// a normal in three bytes (octahedral, 12 bits a coordinate), and back
+const OCT = `
+vec2 octOf(vec3 n) { n /= abs(n.x) + abs(n.y) + abs(n.z); vec2 p = n.xy; if (n.z < 0.0) p = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0); return p; }
+vec3 packNormal(vec3 n) {
+  uvec2 u = uvec2(clamp(octOf(n) * 0.5 + 0.5, 0.0, 1.0) * 4095.0 + 0.5);
+  return vec3(float(u.x & 255u), float((u.x >> 8u) | ((u.y & 15u) << 4u)), float(u.y >> 4u)) / 255.0;
+}
+vec3 unpackNormal(vec3 c) {
+  uvec3 b = uvec3(c * 255.0 + 0.5);
+  vec2 p = vec2(float(b.x | ((b.y & 15u) << 8u)), float((b.y >> 4u) | (b.z << 4u))) / 4095.0 * 2.0 - 1.0;
+  vec3 n = vec3(p, 1.0 - abs(p.x) - abs(p.y));
+  if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+  return normalize(n);
+}`;
+// the shapes' geometry, once a pixel: the shape painter places the surface the trace found (to a centimetre) along the pixel's ray,
+// gives its normal (or the shell's face, where the shape was solid at it) and how tucked in it is
+const fsShapeGeom = (shapeG) => `#version 300 es
+precision highp float; precision highp int; precision highp sampler3D;
+${GLSL_COMMON}
+${shapeG}
+${LOCAL}
+${OCT}
+uniform highp sampler2D uSId; uniform highp sampler2D uSDepth; uniform highp sampler2D uInst;
+uniform mat4 uInvViewProj; uniform mat4 uViewProj; uniform vec2 uRes; uniform vec3 uEye;
+out vec4 oGeom;
+void main() {
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  vec4 idv = texelFetch(uSId, px, 0);
+  float idf = floor(idv.r * 255.0 + 0.5) + floor(idv.g * 255.0 + 0.5) * 256.0;
+  if (idf < 0.5) discard;
+  int i = int(idf) - 1;
+  float z = texelFetch(uSDepth, px, 0).r;
+  vec4 wp = uInvViewProj * vec4((gl_FragCoord.xy / uRes) * 2.0 - 1.0, z * 2.0 - 1.0, 1.0);
+  vec3 P = wp.xyz / wp.w;
+  vec4 t0 = texelFetch(uInst, ivec2(0, i), 0), t1 = texelFetch(uInst, ivec2(1, i), 0), t2 = texelFetch(uInst, ivec2(2, i), 0);
+  int f = int(t0.w + 0.5);
+  bool swap = t1.z > 0.5, moving = t1.w > 0.5;
+  vec3 h = t2.xyz, x = toLocalR(P - t0.xyz, t1.xy, swap);
+  float face = floor(idv.b * 255.0 + 0.5), ao = 0.0;
+  vec3 nl;
+  if (face > 0.5) { float a = floor((face - 1.0) / 2.0); nl = vec3(a < 0.5 ? 1.0 : 0.0, a > 0.5 && a < 1.5 ? 1.0 : 0.0, a > 1.5 ? 1.0 : 0.0) * (mod(face - 1.0, 2.0) > 0.5 ? 1.0 : -1.0); }
+  else {
+    vec3 rl = toLocalR(normalize(P - uEye), t1.xy, swap);
+    x += rl * clamp(shapeFine(f, x, h), -0.02, 0.02);
+    float d0 = shapeFine(f, x, h);
+    // a ray that only grazed the shape (the coarse distance came within a centimetre of an edge it passes): no surface here
+    if (abs(d0) > 0.004) discard;
+    x += rl * d0;
+    vec4 clip = uViewProj * vec4(t0.xyz + fromLocalR(x, t1.xy, swap), 1.0);
+    z = clamp(clip.z / clip.w * 0.5 + 0.5, 0.0, 1.0);
+    nl = shapeNormalAt(f, x, h, 0.0);
+    if (!moving) ao = shapeAO(f, x, h, nl);   // (a moving part's cue: none; it was taught without one)
+  }
+  oGeom = vec4(packNormal(normalize(fromLocalR(nl, t1.xy, swap))), ao);
+  gl_FragDepth = z;
+}`;
+const fsShapePaint = (painters) => `#version 300 es
+precision highp float; precision highp int; precision highp sampler3D; precision highp sampler2DShadow; precision highp sampler2DArray;
+${GLSL_COMMON}
+${painters}
+${LOCAL}
+${OCT}
+uniform highp sampler2D uSId; uniform highp sampler2D uGeom; uniform highp sampler2D uGDepth; uniform highp sampler2D uInst;
+uniform mat4 uInvViewProj; uniform vec2 uRes;
+uniform int uMode; uniform float uT; uniform vec3 uEye; uniform vec3 uSunDir; uniform vec3 uSunIrr;
+uniform highp sampler2DShadow uShadow; uniform mat4 uSunMat; uniform float uShadowTexel; uniform float uShadowOn;
+uniform vec3 uBeaconLight[5]; uniform vec3 uGlow[5];
+uniform vec4 uOccl[8]; uniform int uNOccl;
+uniform sampler2D uAtlas; uniform vec2 uAtlasSize; uniform float uAtlasRGBM; uniform vec2 uOpenTexel;
+out vec4 oColor;
+const vec2 POISSON[12] = vec2[12](${POISSON.map((p) => `vec2(${p[0]}, ${p[1]})`).join(', ')});
+const vec3 OPEN_FIELD = vec3(${OPEN_FIELD.join(', ')});
+float shadowAt(vec3 P, vec3 N) {
+  if (uShadowOn < 0.5) return 1.0;
+  vec4 s = uSunMat * vec4(P + N * 0.05, 1.0);
+  vec3 c = s.xyz / s.w * 0.5 + 0.5;
+  if (c.x < 0.0 || c.y < 0.0 || c.x > 1.0 || c.y > 1.0 || c.z > 1.0) return 1.0;
+  float sum = 0.0;
+  for (int i = 0; i < 12; i++) sum += texture(uShadow, vec3(c.xy + POISSON[i] * uShadowTexel * 1.8, c.z - 0.0009));
+  return sum / 12.0;
+}
+void main() {
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  float z = texelFetch(uGDepth, px, 0).r;
+  if (z >= 1.0) discard;
+  vec4 idv = texelFetch(uSId, px, 0), g = texelFetch(uGeom, px, 0);
+  int i = int(floor(idv.r * 255.0 + 0.5) + floor(idv.g * 255.0 + 0.5) * 256.0) - 1;
+  vec4 wp = uInvViewProj * vec4((gl_FragCoord.xy / uRes) * 2.0 - 1.0, z * 2.0 - 1.0, 1.0);
+  vec3 P = wp.xyz / wp.w;
+  // the box: centre and form, heading and how its axes lie, half sizes and material, shell, glow, colour, glow colour, box min
+  vec4 t0 = texelFetch(uInst, ivec2(0, i), 0), t1 = texelFetch(uInst, ivec2(1, i), 0), t2 = texelFetch(uInst, ivec2(2, i), 0), t3 = texelFetch(uInst, ivec2(3, i), 0);
+  int m = int(t2.w + 0.5), glowK = int(t3.w + 0.5) - 1;
+  bool swap = t1.z > 0.5, moving = t1.w > 0.5;
+  vec3 h = t2.xyz, x = toLocalR(P - t0.xyz, t1.xy, swap);
+  vec3 N = unpackNormal(g.rgb), nl = toLocalR(N, t1.xy, swap);
+  float ao = g.a;
+  vec3 sunC = uSunIrr * shadowAt(P, N) * smoothstep(-0.02, 0.02, dot(N, uSunDir));
+  // the light painter's light at this pixel
+  vec3 sky, bk[5];
+  paint(P, N, uT, sky, bk);
+  vec3 Eind = sky;
+  for (int k = 0; k < 5; k++) Eind += uBeaconLight[k] * bk[k];
+  float far = 0.0;
+  if (!moving) {
+    float occ = 1.0;
+    for (int j = 0; j < 8; j++) {
+      if (j >= uNOccl) break;
+      vec3 w = uOccl[j].xyz - P; float d2 = max(dot(w, w), 1e-3);
+      occ *= 1.0 - clamp(uOccl[j].w * uOccl[j].w / d2 * max(dot(N, w) * inversesqrt(d2), 0.0), 0.0, 0.8);
+    }
+    Eind *= occ;
+    far = smoothstep(18.0, 19.6, max(abs(P.x), abs(P.z)));
+    if (far > 0.0) { vec4 a = texture(uAtlas, uOpenTexel / uAtlasSize); Eind = mix(Eind, uAtlasRGBM > 0.5 ? a.rgb * a.a * 64.0 : a.rgb, far); }
+  }
+  // the surface painter: what the shape is made of, where on it the point is, which way it faces, how tucked in it is
+  vec3 T, B, wInd, wSun, wEm;
+  vec2 uv;
+  if (moving) {
+    vec3 lp = x + h;
+    uv = faceUV(lp, nl);
+    if (domAxis(nl) == 1) uv.y += MAT_UV[m].w;
+    faceTB(nl, T, B); T = normalize(fromLocalR(T, t1.xy, swap)); B = normalize(fromLocalR(B, t1.xy, swap));
+  } else { uv = matUV(m, P, N, texelFetch(uInst, ivec2(7, i), 0).xyz); faceTB(N, T, B); }
+  surfacePaint(m, uv, vec4(0.0), vec3(dot(uSunDir, T), dot(uSunDir, B), dot(uSunDir, N)), N.y, P + N * P_OFF, OPEN_FIELD + N * P_OFF, far, moving ? 0.0 : 1.0, vec4(ao, 1.0, 0.0, 0.0), wInd, wSun, wEm);
+  vec3 L;
+  if (moving) L = texelFetch(uInst, ivec2(5, i), 0).xyz * (wInd * Eind + wSun * sunC) + wEm * texelFetch(uInst, ivec2(6, i), 0).xyz;
+  else { L = wInd * Eind + wSun * sunC; if (glowK >= 0) L += wEm * uGlow[glowK]; }
+  L = applyFog(L, uEye, P, uT);
+  oColor = vec4(tonemap(L * exposureAt(uT)), 1.0);
+  gl_FragDepth = z;
 }`;
 
 const VS_LIGHT = `#version 300 es
@@ -219,7 +399,7 @@ function program(gl, vs, fs, name) {
 // a piece of open lawn inside the painters' volume: what the far field past it is like (its light is one atlas texel)
 const OPEN_FIELD = [-19.5, 0.0, -10.0];
 // static geometry: every box face that is not buried inside another box
-function buildStatic() {
+function buildStatic(withShaped = true) {
   const v = [], openQuad = [];
   const faces = [
     { n: [1, 0, 0], q: (lo, hi) => [[hi[0], lo[1], hi[2]], [hi[0], lo[1], lo[2]], [hi[0], hi[1], lo[2]], [hi[0], hi[1], hi[2]]] },
@@ -233,6 +413,7 @@ function buildStatic() {
   const inBox = (b, p) => p[0] > b.min[0] && p[0] < b.max[0] && p[1] > b.min[1] && p[1] < b.max[1] && p[2] > b.min[2] && p[2] < b.max[2];
   const kept = [];
   BOXES.forEach((b, bi) => {
+    if (b.form && !withShaped) return;
     for (const f of faces) {
       const c = f.q(b.min, b.max), mid = [0, 1, 2].map((a) => (c[0][a] + c[2][a]) / 2);
       const probe = [...c.map((p) => p.map((x, a) => x * 0.995 + mid[a] * 0.005 + f.n[a] * 0.01)), mid.map((x, a) => x + f.n[a] * 0.01)];
@@ -297,8 +478,18 @@ function buildCube() {
   return new Float32Array(v);
 }
 
+// a unit cube's corners (buildCube's faces, wound the same way), for the shaped boxes' shells
+const CUBE36 = (() => { const v = buildCube(), out = []; for (let i = 0; i < v.length; i += 25) out.push(v[i], v[i + 1], v[i + 2]); return new Float32Array(out); })();
+const INST = 29;   // floats an instance: centre 3, heading 2, half sizes 3, shell below 3, shell above 3, (swap, material, glow + 1, moving) 4, colour 3, glow colour 3, box min 3, (form, index) 2
+// an instance: { c, rot, fr (formFrame), swap, mat, glow1, moving, color, emit, bmin, form, index }, as the trace's vertex data and as a
+// row of the paint pass's table (8 texels: centre and form, heading and how its axes lie, half sizes and material, shell below and
+// glow, shell above, colour, glow colour, box min)
+const instanceArr = (o) => [...o.c, ...o.rot, ...o.fr.h, ...o.fr.lo, ...o.fr.hi, o.swap, o.mat, o.glow1, o.moving, ...o.color, ...o.emit, ...o.bmin, o.form, o.index];
+const tableRow = (o) => [...o.c, o.form, ...o.rot, o.swap, o.moving, ...o.fr.h, o.mat, ...o.fr.lo, o.glow1, ...o.fr.hi, 0, ...o.color, 0, ...o.emit, 0, ...o.bmin, 0];
+const MAX_MOVING = 64;
+
 export class Renderer {
-  // painters: { light, surface, sky } (painter.js)
+  // painters: { light, surface, sky, shape } (painter.js); without a shape painter every box is painted as a box
   constructor(canvas, painters, { preserve = false } = {}) {
     const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false, stencil: false, powerPreference: 'high-performance', preserveDrawingBuffer: preserve });
     if (!gl) throw new Error('This browser has no WebGL2.');
@@ -307,6 +498,13 @@ export class Renderer {
     const lightGLSL = painterGLSL(painters.light.head, crystals);
     const both = lightGLSL + surfaceGLSL(painters.surface.head);
     this.progs = { boxes: program(gl, VS_MAIN, fsMain(both, 'boxes'), 'boxes'), still: program(gl, VS_MAIN, fsMain(both, 'still'), 'still'), moving: program(gl, VS_MAIN, fsMain(both, 'moving'), 'moving') };
+    if (painters.shape) {
+      const shapeG = shapeGLSL(painters.shape.head);
+      this.progs.trace = program(gl, VS_SHAPE, fsShapeTrace(shapeG, 'camera'), 'shape trace');
+      this.progs.traceShadow = program(gl, VS_SHAPE, fsShapeTrace(shapeG, 'shadow'), 'shape shadow');
+      this.progs.shapeGeom = program(gl, VS_FULL, fsShapeGeom(shapeG), 'shape geometry');
+      this.progs.shape = program(gl, VS_FULL, fsShapePaint(both), 'shape paint');
+    }
     this.depth = program(gl, VS_MAIN, FS_DEPTH, 'depth');
     this.sky = program(gl, VS_FULL, fsSky(skyGLSL(painters.sky.head)), 'sky');
     this.bright = program(gl, VS_FULL, FS_BRIGHT, 'bright');
@@ -319,9 +517,12 @@ export class Renderer {
       [[0, 3, 0], [1, 3, 3], [2, 2, 6], [3, 3, 8], [4, 3, 11], [5, 1, 14], [6, 2, 15], [7, 4, 17], [8, 4, 21]].forEach(([l, n, o]) => { gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, n, gl.FLOAT, false, S, o * 4); });
       return { vao, count: data.length / 25 };
     };
-    const built = buildStatic();
+    // every box's faces for the boxes view; only the boxes with no form for the painted one (a shaped box is traced in its shell)
+    const built = buildStatic(!painters.shape);
+    this.statikAll = painters.shape ? mkVao(buildStatic(true).verts) : null;
     this.statik = mkVao(built.verts);
     this.cube = mkVao(buildCube());
+    if (painters.shape) this.buildShapes();
     // the light atlas and the pass that repaints it
     this.atlas = { w: built.AW, h: built.AH, texels: built.texels, open: built.open };
     this.light = program(gl, VS_LIGHT, fsLight(lightGLSL), 'light');
@@ -356,9 +557,74 @@ export class Renderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFb);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, this.shadowTex, 0);
     gl.drawBuffers([gl.NONE]); gl.readBuffer(gl.NONE);
+    if (this.progs.shape) {
+      // the still world's shadows, kept while the sun has not moved (tracing every shell into the map is the frame's dearest pass); each
+      // frame the map starts from it and only the moving things are drawn in
+      const rb = gl.createRenderbuffer(); gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, this.shadowSize, this.shadowSize);
+      this.stillShadowFb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, this.stillShadowFb);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
+      gl.drawBuffers([gl.NONE]); gl.readBuffer(gl.NONE);
+      this.stillShadowSun = null;
+    }
     this.samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES));
     this.w = 0; this.h = 0;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+  // the shaped boxes' instances (one vertex array for them all: every form's grid is in one texture) and the moving parts' (refilled
+  // each frame), and the paint pass's table of them
+  buildShapes() {
+    const gl = this.gl, rows = [];
+    BOXES.forEach((b) => {
+      if (!b.form) return;
+      const fr = formFrame(b.form, b.min, b.max), c = [0, 1, 2].map((a) => (b.min[a] + b.max[a]) / 2);
+      rows.push({ c, rot: [1, 0], fr, swap: fr.swap ? 1 : 0, mat: b.m, glow1: b.glow + 1, moving: 0, color: [1, 1, 1], emit: [0, 0, 0], bmin: b.min, form: b.form, index: rows.length });
+    });
+    this.shapeCount = rows.length;
+    const data = new Float32Array(rows.length * INST), table = new Float32Array((rows.length + MAX_MOVING) * 32);
+    rows.forEach((r, i) => { data.set(instanceArr(r), i * INST); table.set(tableRow(r), i * 32); });
+    this.cubeBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, this.cubeBuf); gl.bufferData(gl.ARRAY_BUFFER, CUBE36, gl.STATIC_DRAW);
+    this.shapeBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, this.shapeBuf); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    this.shapeVao = this.instVao(this.shapeBuf);
+    this.movingBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, this.movingBuf); gl.bufferData(gl.ARRAY_BUFFER, MAX_MOVING * INST * 4, gl.DYNAMIC_DRAW);
+    this.movingVao = this.instVao(this.movingBuf);
+    this.instTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.instTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 8, rows.length + MAX_MOVING, 0, gl.RGBA, gl.FLOAT, table);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    this.movingCount = 0;
+  }
+  instVao(buf) {
+    const gl = this.gl, vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.cubeBuf); gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    [[1, 3, 0], [2, 2, 3], [3, 3, 5], [4, 3, 8], [5, 3, 11], [6, 4, 14], [7, 2, 27]].forEach(([l, n, o]) => {
+      gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, n, gl.FLOAT, false, INST * 4, o * 4); gl.vertexAttribDivisor(l, 1);
+    });
+    return vao;
+  }
+  // the moving parts that have a form: their instances and their rows of the table (after the boxes')
+  movingShapes(dynamics) {
+    const gl = this.gl, list = dynamics.filter((d) => d.form).slice(0, MAX_MOVING);
+    this.movingCount = list.length;
+    if (!list.length) return list;
+    const data = new Float32Array(list.length * INST), table = new Float32Array(list.length * 32);
+    list.forEach((d, i) => {
+      const h = d.size.map((x) => x / 2), fr = formFrame(d.form, h.map((x) => -x), h, false);
+      const o = { c: d.pos, rot: [Math.cos(d.yaw), Math.sin(d.yaw)], fr, swap: 0, mat: d.mat, glow1: 0, moving: 1, color: d.color, emit: d.emissive || [0, 0, 0], bmin: [0, 0, 0], form: d.form, index: this.shapeCount + i };
+      data.set(instanceArr(o), i * INST); table.set(tableRow(o), i * 32);
+    });
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.movingBuf); gl.bufferSubData(gl.ARRAY_BUFFER, 0, data);
+    gl.bindTexture(gl.TEXTURE_2D, this.instTex); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, this.shapeCount, 8, list.length, gl.RGBA, gl.FLOAT, table);
+    return list;
+  }
+  // the shells, traced (prog: the trace into the shapes' target, or the one into the sun's shadow map): the boxes', the moving parts'
+  traceShapes(prog, still = true, moving = true) {
+    const gl = this.gl;
+    this.painters.shape.bind(prog.p);
+    if (still) { gl.bindVertexArray(this.shapeVao); gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, this.shapeCount); }
+    if (moving && this.movingCount) { gl.bindVertexArray(this.movingVao); gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, this.movingCount); }
   }
   resize(w, h) {
     const gl = this.gl;
@@ -387,6 +653,25 @@ export class Renderer {
       return { tex, fb: f, w: tw, h: th };
     };
     this.resolve = target(w, h);
+    if (this.progs.shape) {
+      // the shapes' trace target: which box is nearest at each pixel, and its depth
+      if (this.shapeT) { gl.deleteTexture(this.shapeT.id); gl.deleteTexture(this.shapeT.depth); gl.deleteFramebuffer(this.shapeT.fb); }
+      const id = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, id); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+      const dep = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, dep); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT24, w, h);
+      for (const t of [id, dep]) { gl.bindTexture(gl.TEXTURE_2D, t); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); }
+      const sfb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, sfb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, id, 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, dep, 0);
+      this.shapeT = { id, depth: dep, fb: sfb };
+      if (this.geomT) { gl.deleteTexture(this.geomT.col); gl.deleteTexture(this.geomT.depth); gl.deleteFramebuffer(this.geomT.fb); }
+      const col = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, col); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+      const gd = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, gd); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT24, w, h);
+      for (const t of [col, gd]) { gl.bindTexture(gl.TEXTURE_2D, t); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); }
+      const gfb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, gfb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, col, 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, gd, 0);
+      this.geomT = { col, depth: gd, fb: gfb };
+    }
     const hw = Math.max(1, w >> 1), hh = Math.max(1, h >> 1), qw = Math.max(1, w >> 2), qh = Math.max(1, h >> 2);
     this.b1a = target(hw, hh); this.b1b = target(hw, hh); this.b2a = target(qw, qh); this.b2b = target(qw, qh);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -414,18 +699,18 @@ export class Renderer {
     gl.uniform1f(loc.uAtlasOn, this.useAtlas ? 1 : 0); gl.uniform1f(loc.uAtlasRGBM, this.atlas.rgbm ? 1 : 0);
     gl.uniform2fv(loc.uOpenTexel, this.atlas.open);
   }
-  drawStill(prog) {
-    const gl = this.gl, { loc } = prog;
-    gl.bindVertexArray(this.statik.vao);
+  drawStill(prog, all = false) {
+    const gl = this.gl, { loc } = prog, vao = all && this.statikAll ? this.statikAll : this.statik;
+    gl.bindVertexArray(vao.vao);
     gl.uniformMatrix4fv(loc.uModel, false, m4.ident());
     if (loc.uDynamic) gl.uniform1f(loc.uDynamic, 0);
-    gl.drawArrays(gl.TRIANGLES, 0, this.statik.count);
+    gl.drawArrays(gl.TRIANGLES, 0, vao.count);
   }
-  drawMoving(prog, f) {
+  drawMoving(prog, list) {
     const gl = this.gl, { loc } = prog;
     gl.bindVertexArray(this.cube.vao);
     if (loc.uDynamic) gl.uniform1f(loc.uDynamic, 1);
-    for (const d of f.dynamics) {
+    for (const d of list) {
       gl.uniformMatrix4fv(loc.uModel, false, d.model);
       if (loc.uFlatColor) gl.uniform3fv(loc.uFlatColor, d.color);
       if (loc.uEmissive) gl.uniform3fv(loc.uEmissive, d.emissive || [0, 0, 0]);
@@ -434,26 +719,56 @@ export class Renderer {
       gl.drawArrays(gl.TRIANGLES, 0, this.cube.count);
     }
   }
-  drawScene(prog, f, withDynamics = true) {
-    this.drawStill(prog);
-    if (withDynamics) this.drawMoving(prog, f);
+  // the boxes and parts drawn as boxes: in the boxes view every one, in the painted view the ones with no form
+  drawScene(prog, f) {
+    this.drawStill(prog, f.mode === 0);
+    this.drawMoving(prog, f.mode === 0 || !this.progs.shape ? f.dynamics : f.dynamics.filter((d) => !d.form));
   }
   // f: { mode, t, eye, view, proj, beaconLight[15], beaconGlow[15], dynamics[{model,color,emissive,mat,size}], occluders[[x,y,z,r]], time }
   frame(f) {
     const gl = this.gl;
     f.viewProj = m4.mul(f.proj, f.view);
+    f.shapes = this.progs.shape && f.mode >= 1 ? this.movingShapes(f.dynamics) || [] : null;
     gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK);
     // 1. the sun's shadow map
     f.shadowOn = f.mode > 0 && f.sunIrr[0] + f.sunIrr[1] + f.sunIrr[2] > 1e-4;
     if (f.shadowOn) {
       f.sunMat = this.sunMatrix(f.sunDir);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFb);
-      gl.viewport(0, 0, this.shadowSize, this.shadowSize);
-      gl.clear(gl.DEPTH_BUFFER_BIT);
-      gl.useProgram(this.depth.p);
-      gl.uniformMatrix4fv(this.depth.loc.uViewProj, false, f.sunMat);
+      const S = this.shadowSize, sd = f.sunDir;
+      const traceInto = (still, moving) => {
+        const P = this.progs.traceShadow;
+        gl.useProgram(P.p);
+        gl.uniformMatrix4fv(P.loc.uViewProj, false, f.sunMat); gl.uniform3fv(P.loc.uRayDir, sd.map((x) => -x));
+        this.traceShapes(P, still, moving);
+      };
+      gl.viewport(0, 0, S, S);
       gl.cullFace(gl.FRONT);
-      this.drawScene(this.depth, f);
+      if (f.shapes) {
+        // the still world: again only when the sun has moved a tenth of a degree
+        const old = this.stillShadowSun;
+        if (!old || old[0] * sd[0] + old[1] * sd[1] + old[2] * sd[2] < 0.9999985) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, this.stillShadowFb);
+          gl.clear(gl.DEPTH_BUFFER_BIT);
+          gl.useProgram(this.depth.p);
+          gl.uniformMatrix4fv(this.depth.loc.uViewProj, false, f.sunMat);
+          this.drawStill(this.depth);
+          traceInto(true, false);
+          this.stillShadowSun = sd.slice();
+        }
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.stillShadowFb); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.shadowFb);
+        gl.blitFramebuffer(0, 0, S, S, 0, 0, S, S, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFb);
+        gl.useProgram(this.depth.p);
+        gl.uniformMatrix4fv(this.depth.loc.uViewProj, false, f.sunMat);
+        this.drawMoving(this.depth, f.dynamics.filter((d) => !d.form));
+        traceInto(false, true);
+      } else {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFb);
+        gl.clear(gl.DEPTH_BUFFER_BIT);
+        gl.useProgram(this.depth.p);
+        gl.uniformMatrix4fv(this.depth.loc.uViewProj, false, f.sunMat);
+        this.drawScene(this.depth, f);
+      }
       gl.cullFace(gl.BACK);
     } else f.sunMat = m4.ident();
     // 1b. the painter repaints every surface's light into the atlas
@@ -471,6 +786,32 @@ export class Renderer {
       gl.drawArrays(gl.TRIANGLES, 0, this.lightCount);
       gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE);
     }
+    // 1c. the shapes' trace: the nearest shaped box at each pixel, and its depth
+    if (f.shapes) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.shapeT.fb);
+      gl.viewport(0, 0, this.w, this.h);
+      gl.clearColor(0, 0, 0, 0); gl.clearDepth(1); gl.depthMask(true); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.depthFunc(gl.LESS); gl.cullFace(gl.FRONT);
+      const P = this.progs.trace;
+      gl.useProgram(P.p);
+      gl.uniformMatrix4fv(P.loc.uViewProj, false, f.viewProj); gl.uniform3fv(P.loc.uEye, f.eye);
+      this.traceShapes(P);
+      gl.cullFace(gl.BACK);
+      // 1d. the shapes' geometry at those hits, once a pixel
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.geomT.fb);
+      gl.clearColor(0, 0, 0, 0); gl.clearDepth(1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.depthFunc(gl.ALWAYS); gl.disable(gl.CULL_FACE);
+      const G = this.progs.shapeGeom;
+      gl.useProgram(G.p);
+      this.painters.shape.bind(G.p);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.shapeT.id); gl.uniform1i(G.loc.uSId, 1);
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.shapeT.depth); gl.uniform1i(G.loc.uSDepth, 2);
+      gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this.instTex); gl.uniform1i(G.loc.uInst, 3);
+      gl.uniformMatrix4fv(G.loc.uInvViewProj, false, m4.invert(f.viewProj)); gl.uniformMatrix4fv(G.loc.uViewProj, false, f.viewProj);
+      gl.uniform2f(G.loc.uRes, this.w, this.h); gl.uniform3fv(G.loc.uEye, f.eye);
+      gl.bindVertexArray(this.emptyVao); gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.depthFunc(gl.LESS); gl.enable(gl.CULL_FACE);
+    }
     // 2. depth first, so the frame is shaded once a pixel
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.msaa.fb);
     gl.viewport(0, 0, this.w, this.h);
@@ -486,7 +827,21 @@ export class Renderer {
     if (f.mode === 0) { this.setMain(this.progs.boxes, f); this.drawScene(this.progs.boxes, f); }
     else {
       this.setMain(this.progs.still, f); this.drawStill(this.progs.still);
-      if (f.dynamics.length) { this.setMain(this.progs.moving, f); this.drawMoving(this.progs.moving, f); }
+      const plain = f.shapes ? f.dynamics.filter((d) => !d.form) : f.dynamics;
+      if (plain.length) { this.setMain(this.progs.moving, f); this.drawMoving(this.progs.moving, plain); }
+      if (f.shapes) {
+        // the shapes, painted once a pixel at the trace's hits (their depth is the traced surface's)
+        const P = this.progs.shape;
+        gl.depthMask(true); gl.depthFunc(gl.LESS);
+        this.setMain(P, f);
+        gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.shapeT.id); gl.uniform1i(P.loc.uSId, 1);
+        gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.geomT.col); gl.uniform1i(P.loc.uGeom, 2);
+        gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this.instTex); gl.uniform1i(P.loc.uInst, 3);
+        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.geomT.depth); gl.uniform1i(P.loc.uGDepth, 0);
+        gl.uniformMatrix4fv(P.loc.uInvViewProj, false, m4.invert(f.viewProj)); gl.uniform2f(P.loc.uRes, this.w, this.h);
+        gl.bindVertexArray(this.emptyVao); gl.drawArrays(gl.TRIANGLES, 0, 3);
+        gl.depthMask(false); gl.depthFunc(gl.LEQUAL);
+      }
     }
     // 4. the sky where nothing was drawn
     gl.useProgram(this.sky.p);

@@ -19,7 +19,10 @@ def load(tag):
     y = np.fromfile(os.path.join(ROOT, 'data', f'{tag}_y.f32'), dtype=np.float32)
     n = y.size // 18
     pos4, nrm4 = x[: n * 4].reshape(n, 4), x[n * 4:].reshape(n, 4)
-    return pos4[:, :3].copy(), nrm4[:, :3].copy(), pos4[:, 3].copy(), y.reshape(n, 18)
+    y = y.reshape(n, 18)
+    ok = np.isfinite(y).all(1) & np.isfinite(pos4).all(1) & np.isfinite(nrm4).all(1)
+    if (~ok).sum(): print(f'  {tag}: {(~ok).sum()} of {n} points are not all numbers: left out', flush=True)
+    return pos4[ok, :3].copy(), nrm4[ok, :3].copy(), pos4[ok, 3].copy(), y[ok]
 
 
 def corners(p, nrm, h, n):
