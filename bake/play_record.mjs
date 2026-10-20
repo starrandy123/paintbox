@@ -3,7 +3,7 @@
 // rules: it steers the camera toward the next waypoint and holds W, waits by a crystal until it lights, and the shades come as
 // the game sends them (a few can be placed where the camera will see them).
 //   node bake/play_record.mjs <plays.json> [name]   -> out/broll/<name>.mp4
-// plays.json: [{ name, seconds, fps, t, p, camPitch, camDist, show: ["#fps", ...], route: [{ to: [x, y, z], wait?: s, light?: k }],
+// plays.json: [{ name, seconds, fps, w?, h?, t, p, camPitch, camDist, show: ["#fps", ...], route: [{ to: [x, y, z], wait?: s, light?: k }],
 //                shades: [{ at: s, p: [x, y, z] }], modes: [{ at: s, mode: 0|1 }] }]
 import fs from 'node:fs';
 import path from 'node:path';
@@ -20,15 +20,15 @@ const { server, port } = await serve(0, OUT);
 const browser = await chromium.launch({ headless: true, args: GPU_ARGS });
 try {
   for (const play of plays) {
-    const { name, seconds = 20, fps = 30 } = play;
+    const { name, seconds = 20, fps = 30, w = 1080, h = 1920 } = play;
     const dir = path.join(OUT, `${name}_frames`);
     fs.rmSync(dir, { recursive: true, force: true }); fs.mkdirSync(dir);
-    // a phone held upright, drawn at 1080 x 1920
-    const ctx = await browser.newContext({ viewport: { width: 540, height: 960 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
+    // a phone held upright, drawn at 1080 x 1920 (or the play's own w x h, at the same density)
+    const ctx = await browser.newContext({ viewport: { width: Math.round(w / 2), height: Math.round(h / 2) }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
     const page = await ctx.newPage();
     const errs = []; page.on('pageerror', (e) => errs.push(String(e)));
     await page.addInitScript(() => { window.__LP_MANUAL = true; });
-    await page.goto(`http://127.0.0.1:${port}/game/index.html?w=1080&h=1920&preserve=1`);
+    await page.goto(`http://127.0.0.1:${port}/game/index.html?w=${w}&h=${h}&preserve=1`);
     await page.waitForFunction(() => window.LP && window.LP.R() && document.getElementById('loading').classList.contains('gone'), null, { timeout: 30000 });
     await page.evaluate((play) => {
       const { S } = window.LP;

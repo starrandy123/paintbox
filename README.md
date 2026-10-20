@@ -5,7 +5,7 @@ GPU.**
 
 ![The same three cameras: the boxes the code keeps, the frame the AI paints live in the browser, and the path-traced truth it learned from](media/evidence.jpg)
 
-*Left: what the code draws. Middle: what the painters paint from it, live, in 11–18 ms a frame on a 2020 M1 MacBook: the
+*Left: what the code draws. Middle: what the painters paint from it, live, in 16–23 ms a frame on a 2020 M1 MacBook: the
 battlements, the arches, the round columns and the banners' tails are the shape painter's, not the code's. Right: the path-traced
 truth they learned from, about a minute a frame.*
 
@@ -97,8 +97,8 @@ moves in `bake/shots.json`; `npm run gameplay` records a bot playing by the rule
 |---|---|
 | What the painters learned | 14,333,483 numbers, 15.5 MB (4,303 network weights; the rest are feature grids and textures) |
 | How close to the path tracer | the shapes within 0.28 mm of the true surface, the look within 3.6 levels out of 255 on screen, on average, at points they never trained on |
-| One 960×540 frame | 11–18 ms painted (three cameras), against 46–73 s path-traced at 128 paths a pixel |
-| In a browser | 35–49 fps in Chrome's and Safari's engines, at a desktop's 1280×800 and a phone's 775×1677, upright and turned (on the M1; a real phone is not measured yet) |
+| One 960×540 frame | 16–23 ms painted (three cameras), against 46–73 s path-traced at 128 paths a pixel |
+| In a browser | 33–46 fps in Chrome's and Safari's engines, at a desktop's 1280×800 and a phone's 775×1677, upright and turned (on the M1; a real phone is not measured yet) |
 | Making it | about 40 minutes: path tracing the shaped world on the GPU, then training the four painters on the CPU |
 
 ## What it is not

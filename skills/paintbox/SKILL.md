@@ -9,7 +9,7 @@ metadata:
 
 # Paintbox
 
-**Skill version:** 2.0.0
+**Skill version:** 2.0.1
 **For:** any coding agent (Claude Code, Codex, Cursor, ChatGPT) asked for a game whose look is painted by AI, in the browser, on any GPU.
 **Design rule:** **The code keeps the world as boxes. The painters paint what you see, the shapes too. The detail lives only in training.**
 
@@ -118,8 +118,8 @@ pixel, the surface painter paints it.
 1. **The truth, side by side** (`npm run look`, then `bake/sheet.py` for a sheet): the same cameras in the game and in the path
    tracer. The trainers print their errors at points they never trained on (the example: the shapes within 0.28 mm, the look
    within 3.6 levels out of 255 on screen).
-2. **The frame time** (`look` prints it; the example paints a 960×540 frame in 11–18 ms on an M1) and the frame rate at a phone's
-   size (`npm run devices`: the example 35–49 fps in both engines on the M1).
+2. **The frame time** (`look` prints it; the example paints a 960×540 frame in 16–23 ms on an M1) and the frame rate at a phone's
+   size (`npm run devices`: the example 33–46 fps in both engines on the M1).
 3. **The rules** (`npm test`).
 4. **The platform's playtest** in Chromium and WebKit (section 5). A phone emulated on a computer is not a phone: say "phone-sized"
    until the person has played it on theirs.
@@ -132,7 +132,15 @@ Faults already met, and their fixes:
   network place the surface once a pixel; keep the still world's shadow map until the sun moves.
 - *Grain on shaped surfaces*: a normal taken over a millimetre or two reads the network's own error. Take it over a centimetre.
 - *Specks on silhouettes*: a ray that grazes an edge comes within a centimetre on the coarse distance; drop a hit the network puts
-  more than a few millimetres off the surface.
+  more than a few millimetres off the surface, and let the trace go on past a graze (a shape behind may be the one the pixel sees).
+- *Streaks of sky through a face the eye sees at a slant, light lines along edges*: one step of the network's distance along the
+  ray stops short of a face the ray meets at a slant (it closes on it slower than its distance says), and the hit is then dropped.
+  Step by the distance over the ray's closing speed (the coarse distance's slope along the ray: three of its fetches, no network),
+  but only where the coarse field slopes like a distance, and take the plain step where the slanted one leaves the ray further
+  off; the last correction is always the plain distance (a correction divided by a wrong slope lands inside the stone, the normal
+  turns and the pattern streaks across the face). A ray that only passes an edge (the coarse distance rounds an edge out by up to
+  a cell) goes on along the shape, on the coarse distance, to what of it the ray meets behind, inside its shell. About 4 ms a
+  frame on the M1.
 - *A form's flat faces never taught*: a point placed on a shape whose surface is its box's own face sits on the shell's boundary;
   count the boundary as inside.
 - *Grain on a bright material in close-up*: the training points were noisy or few. More light paths a point, more points on that

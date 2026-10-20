@@ -424,8 +424,16 @@ bool shapeTraceCoarse(int f, vec3 ro, vec3 rd, vec3 lo, vec3 hi, vec3 h, out vec
     x = ro + rd * t; fn = t0 == mn.x ? vec3(-sign(rd.x), 0, 0) : (t0 == mn.y ? vec3(0, -sign(rd.y), 0) : vec3(0, 0, -sign(rd.z)));
     return true;
   }
-  for (int i = 0; i < 48; i++) {
-    if (d < 0.01) { x = ro + rd * t; return true; }
+  for (int i = 0; i < 64; i++) {
+    if (d < 0.01) {
+      // near a surface, or only passing close by one: a centimetre on, a ray that meets it is nearer still, one that grazes an edge is
+      // moving away again (keep going: a shape behind it may be the one this pixel sees)
+      float d2 = shapeCoarse(f, ro + rd * (t + 0.01), h);
+      if (d2 < d || d < 0.002) { x = ro + rd * t; return true; }
+      t += 0.01; d = d2;
+      if (t > t1) return false;
+      continue;
+    }
     t += d * 0.9;
     if (t > t1) return false;
     d = shapeCoarse(f, ro + rd * t, h);

@@ -203,6 +203,24 @@ ${OCT}
 uniform highp sampler2D uSId; uniform highp sampler2D uSDepth; uniform highp sampler2D uInst;
 uniform mat4 uInvViewProj; uniform mat4 uViewProj; uniform vec2 uRes; uniform vec3 uEye;
 out vec4 oGeom;
+// how fast a ray closes on the surface, a metre along it, off the coarse distance's slope (three of its fetches, no network): a ray
+// that meets a face at a slant closes slower than its distance says. Where the coarse field is no distance (it runs flat), 1
+float closing(int f, vec3 x, vec3 h, vec3 rl) {
+  float dc = shapeCoarse(f, x, h);
+  vec3 g = vec3(shapeCoarse(f, x + vec3(0.01, 0.0, 0.0), h), shapeCoarse(f, x + vec3(0.0, 0.01, 0.0), h), shapeCoarse(f, x + vec3(0.0, 0.0, 0.01), h)) - dc;
+  float gl = length(g);
+  return gl > 0.005 ? max(-dot(rl, g / gl), 0.2) : 1.0;
+}
+// one step onto the network's surface along the ray: its distance over the closing speed, or the distance alone where that step
+// would leave the ray further off (a slope the coarse field got wrong); d is what is left. True when the surface is within 4 mm
+bool placeOn(int f, inout vec3 x, vec3 h, vec3 rl, out float d) {
+  float d0 = shapeFine(f, x, h);
+  vec3 x1 = x + rl * clamp(d0 / closing(f, x, h, rl), -0.05, 0.05);
+  d = shapeFine(f, x1, h);
+  if (abs(d) > abs(d0)) { x1 = x + rl * clamp(d0, -0.02, 0.02); d = shapeFine(f, x1, h); }
+  x = x1;
+  return abs(d) <= 0.004;
+}
 void main() {
   ivec2 px = ivec2(gl_FragCoord.xy);
   vec4 idv = texelFetch(uSId, px, 0);
@@ -221,11 +239,26 @@ void main() {
   if (face > 0.5) { float a = floor((face - 1.0) / 2.0); nl = vec3(a < 0.5 ? 1.0 : 0.0, a > 0.5 && a < 1.5 ? 1.0 : 0.0, a > 1.5 ? 1.0 : 0.0) * (mod(face - 1.0, 2.0) > 0.5 ? 1.0 : -1.0); }
   else {
     vec3 rl = toLocalR(normalize(P - uEye), t1.xy, swap);
-    x += rl * clamp(shapeFine(f, x, h), -0.02, 0.02);
-    float d0 = shapeFine(f, x, h);
-    // a ray that only grazed the shape (the coarse distance came within a centimetre of an edge it passes): no surface here
-    if (abs(d0) > 0.004) discard;
-    x += rl * d0;
+    float d0;
+    if (!placeOn(f, x, h, rl, d0)) {
+      // the ray only passed by an edge (the coarse distance rounds an edge out by up to a cell): go on along it, on the coarse
+      // distance, to what of this shape it meets behind, inside its shell (else nothing of it is here)
+      vec3 lo = -h - texelFetch(uInst, ivec2(3, i), 0).xyz, hi = h + texelFetch(uInst, ivec2(4, i), 0).xyz;
+      bool met = false;
+      x += rl * 0.01;
+      for (int j = 0; j < 8; j++) {
+        float dj = shapeCoarse(f, x, h);
+        if (dj < 0.01) {
+          vec3 xj = x;
+          if (placeOn(f, xj, h, rl, d0)) { x = xj; met = true; break; }
+          dj = 0.01;
+        }
+        x += rl * dj;
+        if (any(lessThan(x, lo)) || any(greaterThan(x, hi))) break;
+      }
+      if (!met) discard;
+    }
+    x += rl * d0;   // the last of it, a plain step of the distance: never past the surface
     vec4 clip = uViewProj * vec4(t0.xyz + fromLocalR(x, t1.xy, swap), 1.0);
     z = clamp(clip.z / clip.w * 0.5 + 0.5, 0.0, 1.0);
     nl = shapeNormalAt(f, x, h, 0.0);
