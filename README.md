@@ -98,7 +98,7 @@ moves in `bake/shots.json`; `npm run gameplay` records a bot playing by the rule
 | What the painters learned | 14,333,483 numbers, 15.5 MB (4,303 network weights; the rest are feature grids and textures) |
 | How close to the path tracer | the shapes within 0.28 mm of the true surface, the look within 3.6 levels out of 255 on screen, on average, at points they never trained on |
 | One 960×540 frame | 16–23 ms painted (three cameras), against 46–73 s path-traced at 128 paths a pixel |
-| In a browser | 33–46 fps in Chrome's and Safari's engines, at a desktop's 1280×800 and a phone's 775×1677, upright and turned (on the M1; a real phone is not measured yet) |
+| In a browser | 31–46 fps in Chrome's and Safari's engines, at a desktop's 1280×800 and a phone's 775×1677, upright and turned (on the M1; a real phone is not measured yet) |
 | Making it | about 40 minutes: path tracing the shaped world on the GPU, then training the four painters on the CPU |
 
 ## What it is not

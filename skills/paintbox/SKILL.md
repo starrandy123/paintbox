@@ -119,7 +119,7 @@ pixel, the surface painter paints it.
    tracer. The trainers print their errors at points they never trained on (the example: the shapes within 0.28 mm, the look
    within 3.6 levels out of 255 on screen).
 2. **The frame time** (`look` prints it; the example paints a 960×540 frame in 16–23 ms on an M1) and the frame rate at a phone's
-   size (`npm run devices`: the example 33–46 fps in both engines on the M1).
+   size (`npm run devices`: the example 31–46 fps in both engines on the M1).
 3. **The rules** (`npm test`).
 4. **The platform's playtest** in Chromium and WebKit (section 5). A phone emulated on a computer is not a phone: say "phone-sized"
    until the person has played it on theirs.
